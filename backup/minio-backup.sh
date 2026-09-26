@@ -1,15 +1,15 @@
 #!/bin/sh
-# minio-backup - scheduled MinIO -> Cloudflare R2 backups (rclone + supercronic).
+# minio-backup - scheduled MinIO backups to Cloudflare R2 or Google Drive (rclone + supercronic).
 #
 # Usage: minio-backup <command>
 #   daemon                    Validate config, then back up on BACKUP_SCHEDULE (default).
 #   run                       Run one backup now.
-#   check                     Test access to MinIO and R2.
-#   restore <bucket> [target] Copy current/<bucket> from R2 back into MinIO (never deletes).
-#   rclone <args...>          Run rclone with the minio:, r2: and backup: remotes configured.
+#   check                     Test access to MinIO and the backup target.
+#   restore <bucket> [target] Copy current/<bucket> from the backup into MinIO (never deletes).
+#   rclone <args...>          Run rclone with the minio:, target and backup: remotes configured.
 #   healthcheck               Exit non-zero if the last backup failed (used by Docker).
 #
-# Layout under R2_BUCKET/R2_PREFIX (encrypted when BACKUP_ENCRYPTION_PASSWORD is set):
+# Layout in the target folder (encrypted when BACKUP_ENCRYPTION_PASSWORD is set):
 #   current/<bucket>/...              latest copy of every object
 #   archive/<timestamp>/<bucket>/...  objects overwritten or deleted by the run at <timestamp>
 set -euf
@@ -42,10 +42,13 @@ valid_bucket() {
 	esac
 }
 
-# Define rclone remotes purely from the environment; no config file is ever written.
-configure() {
-	[ -n "${MINIO_ACCESS_KEY:-}" ] || die "MINIO_ACCESS_KEY is not set"
-	[ -n "${MINIO_SECRET_KEY:-}" ] || die "MINIO_SECRET_KEY is not set"
+trim_slashes() {
+	p=${1#/}
+	printf '%s' "${p%/}"
+}
+
+# Sets TARGET_PATH (rclone path of the backup root) and TARGET_PROBE_* for `check`.
+configure_r2() {
 	[ -n "${R2_ACCESS_KEY_ID:-}" ] || die "R2_ACCESS_KEY_ID is not set"
 	[ -n "${R2_SECRET_ACCESS_KEY:-}" ] || die "R2_SECRET_ACCESS_KEY is not set"
 	[ -n "${R2_BUCKET:-}" ] || die "R2_BUCKET is not set"
@@ -53,6 +56,51 @@ configure() {
 		[ -n "${R2_ACCOUNT_ID:-}" ] || die "R2_ACCOUNT_ID (or R2_ENDPOINT) is not set"
 		R2_ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
 	fi
+
+	export RCLONE_CONFIG_R2_TYPE=s3
+	export RCLONE_CONFIG_R2_PROVIDER=Cloudflare
+	export RCLONE_CONFIG_R2_ENDPOINT="$R2_ENDPOINT"
+	export RCLONE_CONFIG_R2_REGION=auto
+	export RCLONE_CONFIG_R2_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID"
+	export RCLONE_CONFIG_R2_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY"
+	export RCLONE_CONFIG_R2_ACL=private
+	# Bucket-scoped R2 tokens cannot create buckets, so never try: the bucket must exist.
+	export RCLONE_CONFIG_R2_NO_CHECK_BUCKET=true
+
+	prefix=$(trim_slashes "${R2_PREFIX:-}")
+	TARGET_PATH="r2:$R2_BUCKET${prefix:+/$prefix}"
+	TARGET_PROBE_LABEL="list R2 bucket '$R2_BUCKET' (it must already exist)"
+	TARGET_PROBE_ARGS="lsd r2:$R2_BUCKET"
+}
+
+configure_gdrive() {
+	[ -n "${GDRIVE_CLIENT_ID:-}" ] || die "GDRIVE_CLIENT_ID is not set"
+	[ -n "${GDRIVE_CLIENT_SECRET:-}" ] || die "GDRIVE_CLIENT_SECRET is not set"
+	case "${GDRIVE_TOKEN:-}" in
+	'{'*'refresh_token'*'}') ;;
+	*) die "GDRIVE_TOKEN must be the JSON printed by 'rclone authorize' (wrap it in single quotes)" ;;
+	esac
+	folder=$(trim_slashes "${GDRIVE_FOLDER:-minio-backups}")
+	[ -n "$folder" ] || die "GDRIVE_FOLDER must name a folder, not the root of My Drive"
+
+	export RCLONE_CONFIG_GDRIVE_TYPE=drive
+	export RCLONE_CONFIG_GDRIVE_CLIENT_ID="$GDRIVE_CLIENT_ID"
+	export RCLONE_CONFIG_GDRIVE_CLIENT_SECRET="$GDRIVE_CLIENT_SECRET"
+	export RCLONE_CONFIG_GDRIVE_TOKEN="$GDRIVE_TOKEN"
+	# drive.file: rclone only ever sees files it created itself, nothing else in the Drive.
+	export RCLONE_CONFIG_GDRIVE_SCOPE=drive.file
+	# Expired archives are deleted for good instead of filling the Drive trash (and quota).
+	export RCLONE_CONFIG_GDRIVE_USE_TRASH=false
+
+	TARGET_PATH="gdrive:$folder"
+	TARGET_PROBE_LABEL="sign in to Google Drive"
+	TARGET_PROBE_ARGS="about gdrive:"
+}
+
+# Define rclone remotes purely from the environment; no config file is ever written.
+configure() {
+	[ -n "${MINIO_ACCESS_KEY:-}" ] || die "MINIO_ACCESS_KEY is not set"
+	[ -n "${MINIO_SECRET_KEY:-}" ] || die "MINIO_SECRET_KEY is not set"
 
 	BACKUP_MODE=${BACKUP_MODE:-sync}
 	case "$BACKUP_MODE" in
@@ -73,40 +121,32 @@ configure() {
 	export RCLONE_CONFIG_MINIO_ACCESS_KEY_ID="$MINIO_ACCESS_KEY"
 	export RCLONE_CONFIG_MINIO_SECRET_ACCESS_KEY="$MINIO_SECRET_KEY"
 
-	export RCLONE_CONFIG_R2_TYPE=s3
-	export RCLONE_CONFIG_R2_PROVIDER=Cloudflare
-	export RCLONE_CONFIG_R2_ENDPOINT="$R2_ENDPOINT"
-	export RCLONE_CONFIG_R2_REGION=auto
-	export RCLONE_CONFIG_R2_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID"
-	export RCLONE_CONFIG_R2_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY"
-	export RCLONE_CONFIG_R2_ACL=private
-	# Bucket-scoped R2 tokens cannot create buckets, so never try: the bucket must exist.
-	export RCLONE_CONFIG_R2_NO_CHECK_BUCKET=true
+	BACKUP_TARGET=${BACKUP_TARGET:-r2}
+	case "$BACKUP_TARGET" in
+	r2) configure_r2 ;;
+	gdrive) configure_gdrive ;;
+	*) die "BACKUP_TARGET must be 'r2' or 'gdrive' (got '$BACKUP_TARGET')" ;;
+	esac
 
-	prefix=${R2_PREFIX:-}
-	prefix=${prefix#/}
-	prefix=${prefix%/}
-	r2_path="$R2_BUCKET${prefix:+/$prefix}"
-
-	# "backup:" is the root holding current/ and archive/ - R2 directly, or R2 behind rclone crypt.
+	# "backup:" is the root holding current/ and archive/ - the target directly, or behind rclone crypt.
 	export RCLONE_CONFIG_BACKUP_TYPE=alias
 	if [ -n "${BACKUP_ENCRYPTION_PASSWORD:-}" ]; then
-		export RCLONE_CONFIG_R2CRYPT_TYPE=crypt
-		export RCLONE_CONFIG_R2CRYPT_REMOTE="r2:$r2_path"
-		export RCLONE_CONFIG_R2CRYPT_FILENAME_ENCRYPTION=standard
-		export RCLONE_CONFIG_R2CRYPT_DIRECTORY_NAME_ENCRYPTION=true
+		export RCLONE_CONFIG_CRYPT_TYPE=crypt
+		export RCLONE_CONFIG_CRYPT_REMOTE="$TARGET_PATH"
+		export RCLONE_CONFIG_CRYPT_FILENAME_ENCRYPTION=standard
+		export RCLONE_CONFIG_CRYPT_DIRECTORY_NAME_ENCRYPTION=true
 		# Read from stdin so the secrets never appear in a process argument list.
-		RCLONE_CONFIG_R2CRYPT_PASSWORD=$(printf '%s' "$BACKUP_ENCRYPTION_PASSWORD" | rclone obscure -)
-		export RCLONE_CONFIG_R2CRYPT_PASSWORD
+		RCLONE_CONFIG_CRYPT_PASSWORD=$(printf '%s' "$BACKUP_ENCRYPTION_PASSWORD" | rclone obscure -)
+		export RCLONE_CONFIG_CRYPT_PASSWORD
 		if [ -n "${BACKUP_ENCRYPTION_SALT:-}" ]; then
-			RCLONE_CONFIG_R2CRYPT_PASSWORD2=$(printf '%s' "$BACKUP_ENCRYPTION_SALT" | rclone obscure -)
-			export RCLONE_CONFIG_R2CRYPT_PASSWORD2
+			RCLONE_CONFIG_CRYPT_PASSWORD2=$(printf '%s' "$BACKUP_ENCRYPTION_SALT" | rclone obscure -)
+			export RCLONE_CONFIG_CRYPT_PASSWORD2
 		fi
-		export RCLONE_CONFIG_BACKUP_REMOTE="r2crypt:"
-		DEST_DESC="r2:$r2_path (encrypted)"
+		export RCLONE_CONFIG_BACKUP_REMOTE="crypt:"
+		DEST_DESC="$TARGET_PATH (encrypted)"
 	else
-		export RCLONE_CONFIG_BACKUP_REMOTE="r2:$r2_path"
-		DEST_DESC="r2:$r2_path"
+		export RCLONE_CONFIG_BACKUP_REMOTE="$TARGET_PATH"
+		DEST_DESC="$TARGET_PATH"
 	fi
 }
 
@@ -231,7 +271,8 @@ check() {
 	else
 		probe "list MinIO buckets" lsd minio: || rc=1
 	fi
-	probe "list R2 bucket '$R2_BUCKET' (it must already exist)" lsd "r2:$R2_BUCKET" || rc=1
+	# shellcheck disable=SC2086
+	probe "$TARGET_PROBE_LABEL" $TARGET_PROBE_ARGS || rc=1
 	if printf 'ok\n' | probe "write to $DEST_DESC" rcat backup:.minio-backup-write-test; then
 		rclone deletefile backup:.minio-backup-write-test >/dev/null 2>&1 || true
 	else
