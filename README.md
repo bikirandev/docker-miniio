@@ -102,14 +102,17 @@ Recommended extras:
    in at least these, then save:
    - `MINIO_ROOT_USER` and `MINIO_ROOT_PASSWORD`. Generate them with
      `openssl rand -hex 32`.
-   - `MINIO_BROWSER_REDIRECT_URL`
-5. On the **Domains** tab, add two domains. For both, turn **HTTPS** on and choose
-   **Let's Encrypt** as the certificate provider:
+   - `MINIO_BROWSER_REDIRECT_URL`, set to the **console** domain (the one on port 9001).
+5. On the **Domains** tab, add two domains, one per port. For both, turn **HTTPS** on
+   and choose **Let's Encrypt** as the certificate provider:
 
    | Service | Host | Container port | Serves |
    | --- | --- | --- | --- |
    | `minio` | `s3.example.com` | `9000` | S3 API |
    | `minio` | `console.example.com` | `9001` | Web console |
+
+   No DNS yet? [sslip.io](https://sslip.io) names work too, for example
+   `s3-203-0-113-10.sslip.io` and `console-203-0-113-10.sslip.io` (use your server's IP).
 
 6. Optional but recommended: enable **Isolated Deployment** in the compose service
    settings.
@@ -369,7 +372,17 @@ Otherwise Compose treats `$def` as a variable.
 The volume holds root-owned data from an older deployment. Run the `chown` command from
 [Upgrading](#upgrading).
 
-**Console login fails or loops.**
+**The browser says "redirected you too many times" (307 loop).**
+The domain you opened is routed to port **9000** (the S3 API; responses carry
+`X-Amz-Request-Id` headers), and `MINIO_BROWSER_REDIRECT` is `on` with
+`MINIO_BROWSER_REDIRECT_URL` pointing at that same domain. Route a separate domain to
+port **9001** for the console, set `MINIO_BROWSER_REDIRECT_URL` to it, and keep
+`MINIO_BROWSER_REDIRECT=off`.
+
+**The console domain shows an XML `AccessDenied` page.**
+That domain is routed to port 9000. Change its container port to 9001.
+
+**Console login fails.**
 Check that `MINIO_BROWSER_REDIRECT_URL` is exactly the console URL, including
 `https://`. Leave `MINIO_SERVER_URL` empty.
 
@@ -405,7 +418,8 @@ A setting is invalid. The last log line names it.
 | --- | --- | --- |
 | `MINIO_ROOT_USER` | *required* | Root user name |
 | `MINIO_ROOT_PASSWORD` | *required* | Root password (8+ chars; use 32+ random) |
-| `MINIO_BROWSER_REDIRECT_URL` | – | Public console URL |
+| `MINIO_BROWSER_REDIRECT_URL` | – | Public console URL (the port-9001 domain) |
+| `MINIO_BROWSER_REDIRECT` | `off` | `on` redirects browsers from the API domain to the console |
 | `MINIO_SERVER_URL` | – | Public S3 API URL (optional) |
 | `MINIO_BROWSER` | `on` | `off` disables the web console |
 | `BACKUP_ENABLED` | `false` | Turn scheduled backups on |
