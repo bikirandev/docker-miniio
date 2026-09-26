@@ -1,0 +1,95 @@
+# MinIO (S3-compatible object storage) for Dokploy, with scheduled backups to Cloudflare R2.
+# Every setting comes from the environment - see .env.example and README.md.
+#
+# Nothing here publishes a host port: add the domains in Dokploy (Domains tab) and Traefik
+# serves the S3 API (port 9000) and the web console (port 9001) over HTTPS.
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  minio:
+    # MinIO Inc. stopped publishing images in Oct 2025, archived minio/minio in 2026 and has
+    # since deleted the minio/minio images from Docker Hub. pgsty/silo is the maintained
+    # community fork and a drop-in replacement: same MINIO_* variables, same /data format,
+    # full web console, ongoing CVE fixes. The distroless variant contains only the server
+    # binary (no shell, no package manager). Pinned by digest - see README "Upgrading".
+    image: pgsty/silo:RELEASE.2026-09-16T00-00-00Z-distroless@sha256:32a8a777d90f3296294c9a57da5e8d397121187c4b868b2a7fc7874c726c0291
+    command: ["server", "/data", "--address", ":9000", "--console-address", ":9001"]
+    restart: unless-stopped
+    user: "1000:1000"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?MINIO_ROOT_USER must be set}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD must be set}
+      MINIO_BROWSER: ${MINIO_BROWSER:-on}
+      MINIO_BROWSER_REDIRECT_URL: ${MINIO_BROWSER_REDIRECT_URL:-}
+      MINIO_SERVER_URL: ${MINIO_SERVER_URL:-}
+    volumes:
+      - minio-data:/data
+    expose:
+      - "9000" # S3 API
+      - "9001" # web console
+    healthcheck:
+      test: ["CMD", "/usr/bin/silo", "healthcheck", "ready"]
+      interval: 30s
+      timeout: 10s
+      start_period: 2m
+      start_interval: 2s
+      retries: 3
+    logging: *logging
+
+  backup:
+    build:
+      context: ./backup
+    restart: unless-stopped
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      TZ: ${TZ:-UTC}
+      BACKUP_ENABLED: ${BACKUP_ENABLED:-false}
+      BACKUP_SCHEDULE: "${BACKUP_SCHEDULE:-0 3 * * *}"
+      BACKUP_RUN_ON_STARTUP: ${BACKUP_RUN_ON_STARTUP:-false}
+      BACKUP_MODE: ${BACKUP_MODE:-sync}
+      BACKUP_BUCKETS: ${BACKUP_BUCKETS:-}
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-30}
+      BACKUP_ENCRYPTION_PASSWORD: ${BACKUP_ENCRYPTION_PASSWORD:-}
+      BACKUP_ENCRYPTION_SALT: ${BACKUP_ENCRYPTION_SALT:-}
+      BACKUP_RCLONE_FLAGS: ${BACKUP_RCLONE_FLAGS:-}
+      BACKUP_PING_START_URL: ${BACKUP_PING_START_URL:-}
+      BACKUP_PING_SUCCESS_URL: ${BACKUP_PING_SUCCESS_URL:-}
+      BACKUP_PING_FAILURE_URL: ${BACKUP_PING_FAILURE_URL:-}
+      # Source: this stack's MinIO over the private compose network.
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: ${BACKUP_MINIO_ACCESS_KEY:-${MINIO_ROOT_USER}}
+      MINIO_SECRET_KEY: ${BACKUP_MINIO_SECRET_KEY:-${MINIO_ROOT_PASSWORD}}
+      # Destination: Cloudflare R2.
+      R2_ACCOUNT_ID: ${R2_ACCOUNT_ID:-}
+      R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID:-}
+      R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY:-}
+      R2_BUCKET: ${R2_BUCKET:-}
+      R2_PREFIX: ${R2_PREFIX:-minio}
+      R2_ENDPOINT: ${R2_ENDPOINT:-}
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/minio-backup", "healthcheck"]
+      interval: 1m
+      timeout: 10s
+      retries: 1
+    logging: *logging
+
+volumes:
+  minio-data:
