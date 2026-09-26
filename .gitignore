@@ -1,0 +1,7 @@
+# Real secrets live in Dokploy or a local .env - never in git.
+.env
+.env.*
+!.env.example
+
+# Local-only port mappings (see README "Run locally"); Dokploy never loads this file.
+docker-compose.override.yml
