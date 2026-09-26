@@ -80,13 +80,18 @@ services:
       MINIO_ENDPOINT: http://minio:9000
       MINIO_ACCESS_KEY: ${BACKUP_MINIO_ACCESS_KEY:-${MINIO_ROOT_USER}}
       MINIO_SECRET_KEY: ${BACKUP_MINIO_SECRET_KEY:-${MINIO_ROOT_PASSWORD}}
-      # Destination: Cloudflare R2.
+      # Destination: Cloudflare R2 (BACKUP_TARGET=r2) or Google Drive (BACKUP_TARGET=gdrive).
+      BACKUP_TARGET: ${BACKUP_TARGET:-r2}
       R2_ACCOUNT_ID: ${R2_ACCOUNT_ID:-}
       R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID:-}
       R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY:-}
       R2_BUCKET: ${R2_BUCKET:-}
       R2_PREFIX: ${R2_PREFIX:-minio}
       R2_ENDPOINT: ${R2_ENDPOINT:-}
+      GDRIVE_CLIENT_ID: ${GDRIVE_CLIENT_ID:-}
+      GDRIVE_CLIENT_SECRET: ${GDRIVE_CLIENT_SECRET:-}
+      GDRIVE_TOKEN: ${GDRIVE_TOKEN:-}
+      GDRIVE_FOLDER: ${GDRIVE_FOLDER:-minio-backups}
     healthcheck:
       test: ["CMD", "/usr/local/bin/minio-backup", "healthcheck"]
       interval: 1m

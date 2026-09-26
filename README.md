@@ -1,9 +1,9 @@
-# MinIO on Dokploy, with scheduled backups to Cloudflare R2
+# MinIO on Dokploy, with scheduled backups to Cloudflare R2 or Google Drive
 
 A hardened Docker Compose stack that runs MinIO (S3-compatible object storage) on
-[Dokploy](https://dokploy.com). A backup sidecar copies your buckets to a
-[Cloudflare R2](https://developers.cloudflare.com/r2/) bucket on a cron schedule. All
-settings live in environment variables.
+[Dokploy](https://dokploy.com). A backup sidecar copies your buckets on a cron schedule
+to a [Cloudflare R2](https://developers.cloudflare.com/r2/) bucket or to a folder in
+Google Drive. All settings live in environment variables.
 
 ```
                  HTTPS (Let's Encrypt, via Dokploy's Traefik)
@@ -12,7 +12,7 @@ settings live in environment variables.
                                                       │
                           backup ── S3 API ──► minio  ┘
                              │  rclone, on BACKUP_SCHEDULE
-                             └──────── HTTPS ────────► Cloudflare R2 bucket
+                             └──────── HTTPS ────────► Cloudflare R2 or Google Drive
 ```
 
 | File | Purpose |
@@ -21,6 +21,7 @@ settings live in environment variables.
 | [.env.example](.env.example) | Every setting, with comments. Paste it into Dokploy |
 | [backup/Dockerfile](backup/Dockerfile) | Backup image: official rclone plus supercronic |
 | [backup/minio-backup.sh](backup/minio-backup.sh) | Backup, check and restore logic |
+| [docs/google-drive-backup.md](docs/google-drive-backup.md) | Setup guide for Google Drive as the backup target |
 
 ## About the MinIO image
 
@@ -147,12 +148,20 @@ services:
     ports: ["127.0.0.1:9000:9000", "127.0.0.1:9001:9001"]
 ```
 
-## Backups to Cloudflare R2
+## Backups to Cloudflare R2 or Google Drive
 
 The `backup` service runs [rclone](https://rclone.org) on a cron schedule
 ([supercronic](https://github.com/aptible/supercronic)). It reads every object through
 the S3 API, so each copy is consistent per object and MinIO never has to stop. Each run
 is incremental: only new or changed objects are uploaded.
+
+`BACKUP_TARGET` picks the destination:
+
+- **`r2`** (default): Cloudflare R2, set up in the steps below.
+- **`gdrive`**: a folder in your Google Drive. Follow
+  [docs/google-drive-backup.md](docs/google-drive-backup.md) instead of steps 1 and 2.
+  Everything after that (layout, encryption, retention, monitoring, restore) works the
+  same.
 
 ### 1. Prepare R2
 
@@ -263,7 +272,8 @@ When `BACKUP_ENCRYPTION_PASSWORD` is set, backups go through an
 
 > **Save the password and salt in a password manager.** Without them the backups cannot
 > be decrypted, by you or by anyone else. Don't change them once backups exist. To
-> switch encryption on or off, or to rotate the keys, use a new `R2_PREFIX`.
+> switch encryption on or off, or to rotate the keys, use a new `R2_PREFIX` (or
+> `GDRIVE_FOLDER`).
 
 ### Least-privilege backup user
 
@@ -331,8 +341,8 @@ docker exec <container> minio-backup rclone copy \
 configured:
 
 - `minio:` is this stack's MinIO.
-- `r2:` is the raw R2 account.
-- `backup:` is `R2_BUCKET/R2_PREFIX`, decrypted when encryption is on.
+- `r2:` or `gdrive:` is the raw target (R2 account or Google Drive).
+- `backup:` is `R2_BUCKET/R2_PREFIX` or `GDRIVE_FOLDER`, decrypted when encryption is on.
 
 **Disaster recovery (new server):**
 
@@ -429,11 +439,15 @@ A setting is invalid. The last log line names it.
 | `BACKUP_MODE` | `sync` | `sync` mirrors deletions into `archive/`; `copy` never removes |
 | `BACKUP_BUCKETS` | all | Comma-separated bucket names |
 | `BACKUP_RETENTION_DAYS` | `30` | Days to keep `archive/` runs; `0` keeps them forever |
+| `BACKUP_TARGET` | `r2` | Destination: `r2` or `gdrive` |
 | `R2_ACCOUNT_ID` | – | Cloudflare account ID (builds the endpoint URL) |
 | `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` | – | R2 API token keys |
 | `R2_BUCKET` | – | Existing R2 bucket |
 | `R2_PREFIX` | `minio` | Folder inside the bucket |
 | `R2_ENDPOINT` | derived | Override, e.g. `https://<id>.eu.r2.cloudflarestorage.com` |
+| `GDRIVE_CLIENT_ID` / `GDRIVE_CLIENT_SECRET` | – | Your Google OAuth client (Desktop app) |
+| `GDRIVE_TOKEN` | – | JSON from `rclone authorize`, in single quotes |
+| `GDRIVE_FOLDER` | `minio-backups` | Folder in My Drive (created by rclone) |
 | `BACKUP_ENCRYPTION_PASSWORD` / `_SALT` | – | Turns on client-side encryption |
 | `BACKUP_MINIO_ACCESS_KEY` / `_SECRET_KEY` | root | Credentials the backup job uses to read MinIO |
 | `BACKUP_PING_START_URL` / `_SUCCESS_URL` / `_FAILURE_URL` | – | Monitoring URLs (HTTP GET) |
